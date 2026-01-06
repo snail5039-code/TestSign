@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: slt-postgres
+    environment:
+      POSTGRES_DB: slt
+      POSTGRES_USER: sltuser
+      POSTGRES_PASSWORD: sltpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - slt_pgdata:/var/lib/postgresql/data
+
+volumes:
+  slt_pgdata:

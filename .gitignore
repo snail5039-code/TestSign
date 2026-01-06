@@ -1,0 +1,78 @@
+# ===== OS / IDE =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+.vscode/
+.idea/
+*.iml
+
+# ===== Java / Maven / Spring =====
+**/target/
+**/*.log
+**/.classpath
+**/.project
+**/.settings/
+
+# ===== React / Node =====
+**/node_modules/
+**/dist/
+**/.vite/
+**/.eslintcache
+
+# ===== Python =====
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.venv/
+**/venv/
+
+# ===== Large datasets / generated arrays =====
+**/dataset_npy*/
+**/*.npy
+**/*.npz
+
+# ===== AIHub raw downloads (절대 올리면 안 됨) =====
+aihub_download/
+**/aihub_download/
+**/라벨링데이터/
+**/원천데이터/
+
+# ===== Model artifacts (용량 크면 git에 X) =====
+**/weights.pt
+**/*.pt
+**/*.pth
+
+# ===== Secrets / local configs =====
+**/.env
+**/application-local.yml
+**/application-secret.yml
+**/*secret*.yml
+**/*key*.yml
+
+# Eclipse workspace (절대 올리지 마)
+.metadata/
+
+# Build outputs
+**/target/
+**/dist/
+**/.vite/
+**/node_modules/
+
+# Python env/cache
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+
+# AIHub / dataset artifacts (절대 올리지 마)
+aihub_download/
+**/dataset_npy*/
+**/*.npy
+**/*.npz
+
+# Model weights (원하면 나중에 LFS)
+**/*.pt
+**/*.pth
