@@ -1,16 +1,15 @@
 package com.example.backend.controller;
 
+
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
 import com.example.backend.dao.WordMapper;
 import com.example.backend.dto.TranslateDtos.TranslateRequest;
 import com.example.backend.dto.TranslateDtos.TranslateResponse;
 import com.example.backend.service.PythonTranslateService;
-
 import jakarta.validation.Valid;
 
 @RestController

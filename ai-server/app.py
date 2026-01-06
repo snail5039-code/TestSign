@@ -6,7 +6,7 @@ import torch
 import json
 from pathlib import Path
 
-from model import AttnBiGRU
+from model import AttnLSTM
 from normalize import normalize_frame
 from feature import add_delta
 
@@ -67,7 +67,7 @@ if not weights_path.exists():
 
 ckpt = torch.load(weights_path, map_location=device)
 classes = int(ckpt["classes"])
-model = AttnBiGRU(classes=classes).to(device)
+model = AttnLSTM(classes=classes).to(device)
 model.load_state_dict(ckpt["model"])
 model.eval()
 
