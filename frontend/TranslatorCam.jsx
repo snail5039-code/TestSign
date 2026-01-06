@@ -115,7 +115,7 @@ export default function TranslatorCam() {
 
   async function onStart() {
     setErr("");
-    if (!ready) return;
+    if (!ready) return;  
     await startCam();
     framesRef.current = [];
     setRunning(true);
