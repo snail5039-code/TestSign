@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from model import AttnBiGRU
+from model import AttnLSTM
 
 class NpyDataset(Dataset):
     def __init__(self, X, y):
@@ -40,7 +40,7 @@ def main():
 
     classes = int(y.max()) + 1
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AttnBiGRU(classes=classes).to(device)
+    model = AttnLSTM(classes=classes).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     best = 0.0

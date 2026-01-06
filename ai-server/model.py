@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class AttnBiGRU(nn.Module):
+class AttnLSTM(nn.Module):
     def __init__(self, input_dim=822, hidden=256, layers=2, classes=30, dropout=0.25):
         super().__init__()
-        self.gru = nn.GRU(
+        # GRU를 LSTM으로 변경
+        self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden,
             num_layers=layers,
@@ -22,8 +23,8 @@ class AttnBiGRU(nn.Module):
         )
 
     def forward(self, x):
-        h, _ = self.gru(x)                 # (B,T,2H)
-        w = self.attn(h).squeeze(-1)       # (B,T)
+        h, _ = self.lstm(x)  # (B, T, 2H) LSTM으로 수정
+        w = self.attn(h).squeeze(-1)  # (B, T)
         a = F.softmax(w, dim=1).unsqueeze(-1)
-        pooled = (h * a).sum(dim=1)        # (B,2H)
+        pooled = (h * a).sum(dim=1)  # (B, 2H)
         return self.head(pooled)
