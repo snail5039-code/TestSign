@@ -21,7 +21,7 @@ class AttnLSTM(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden, classes),
         )
-
+        
     def forward(self, x):
         h, _ = self.lstm(x)  # (B, T, 2H) LSTM으로 수정
         w = self.attn(h).squeeze(-1)  # (B, T)
