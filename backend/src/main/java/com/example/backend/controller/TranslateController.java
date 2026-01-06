@@ -1,37 +1,72 @@
 package com.example.backend.controller;
 
 
-import org.springframework.web.bind.annotation.CrossOrigin;
+import java.util.Map;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import com.example.backend.dao.WordMapper;
-import com.example.backend.dto.TranslateDtos.TranslateRequest;
-import com.example.backend.dto.TranslateDtos.TranslateResponse;
-import com.example.backend.service.PythonTranslateService;
-import jakarta.validation.Valid;
+import org.springframework.web.reactive.function.client.WebClient;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = {"http://localhost:5173"})
 public class TranslateController {
-  private final PythonTranslateService py;
-  private final WordMapper wordMapper;
+	
+    private final WebClient webClient;
 
-  public TranslateController(PythonTranslateService py, WordMapper wordMapper) {
-    this.py = py;
-    this.wordMapper = wordMapper;
-  }
+    public TranslateController(
+            WebClient.Builder builder,
+            @Value("${fastapi.base-url}") String baseUrl
+    ) {
+        this.webClient = builder.baseUrl(baseUrl).build();
+    }
+    
+    private static final ParameterizedTypeReference<Map<String, Object>> MAP_STRING_OBJECT =
+            new ParameterizedTypeReference<>() {};
+            
+    @PostMapping(
+            value = "/translate",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Map<String, Object> translate(@RequestBody Map<String, Object> body) {
 
-  @PostMapping("/translate")
-  public TranslateResponse translate(@Valid @RequestBody TranslateRequest req) {
-    TranslateResponse res = py.predict(req);
+        // 프론트: { frames: [...] }
+        // FastAPI: /predict 가 { frames: [...] } 받도록 되어있으니 그대로 전달
+        Map<String, Object> fast = webClient.post()
+                .uri("/predict")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .retrieve()
+                .bodyToMono(MAP_STRING_OBJECT)
+                .block();
 
-    // DB에 word 매핑 있으면 text 덮기(권장)
-    wordMapper.findKoText(res.label).ifPresent(v -> res.text = v);
+        if (fast == null) {
+            return Map.of(
+                    "label", "unknown",
+                    "confidence", 0.0,
+                    "text", "unknown",
+                    "raw", Map.of()
+            );
+        }
 
-    wordMapper.insertLog(res.label, res.text, res.confidence);
-    return res;
-  }
+        // 프론트 UI가 label/confidence/text를 기대하는 형태라면 여기서 맞춰줌
+        Object label = fast.getOrDefault("label", fast.get("pred"));
+        Object confidence = fast.getOrDefault("confidence", fast.getOrDefault("score", 0.0));
+
+        fast.put("label", label);
+        fast.put("confidence", confidence);
+        fast.putIfAbsent("text", label);
+        
+        if (!fast.containsKey("candidates")) {
+            Object top5 = fast.get("top5");
+            if (top5 != null) fast.put("candidates", top5);
+        }
+
+        return fast;
+    }
 }

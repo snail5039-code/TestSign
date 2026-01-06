@@ -32,6 +32,17 @@ export default function Home() {
                 <span className="text-slate-400">→</span>
               </Link>
             </li>
+            <li>
+              <Link
+                to="/collect"
+                className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-4 ring-1 ring-slate-200 hover:bg-slate-100"
+              >
+                <span className="font-semibold text-slate-900">
+                  영상 추출
+                </span>
+                <span className="text-slate-400">→</span>
+              </Link>
+            </li>
 
             <li>
               <Link
