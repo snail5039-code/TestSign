@@ -4,3 +4,4 @@ pydantic
 numpy
 torch
 tqdm
+scikit-learn
