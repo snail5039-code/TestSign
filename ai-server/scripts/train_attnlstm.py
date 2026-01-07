@@ -46,7 +46,6 @@ class AttnBiLSTMClassifier(nn.Module):
             bidirectional=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
-        # Additive attention: score_t = v^T tanh(W h_t)
         self.attn_W = nn.Linear(hidden_dim * 2, hidden_dim)
         self.attn_v = nn.Linear(hidden_dim, 1, bias=False)
 
@@ -75,20 +74,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz", default="artifacts/dataset.npz")
     ap.add_argument("--out_dir", default="artifacts")
-    ap.add_argument("--epochs", type=int, default=120)
+    ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--hidden", type=int, default=96)   # 데이터 작으니 64~128 권장
+    ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.35)
     ap.add_argument("--seed", type=int, default=42)
 
-    # 프론트가 face=0이므로 학습도 face 영역을 0으로 맞춰서 분포 일치
+    # 프론트가 face=0이면 학습도 face 영역을 0으로 맞추는 게 일반적으로 유리
     ap.add_argument("--zero_face", action="store_true", default=True)
 
-    # 얼리스탑
     ap.add_argument("--patience", type=int, default=15)
-
     args = ap.parse_args()
 
     seed_all(args.seed)
@@ -101,8 +98,9 @@ def main():
     X = data["X"].astype(np.float32)  # (N,T,D)
     y = data["y"].astype(np.int64)
 
+    # class names
     classes = None
-    for k in ["classes", "class_names", "labels"]:
+    for k in ["class_names", "classes", "labels"]:
         if k in data:
             classes = data[k]
             break
@@ -114,17 +112,29 @@ def main():
     C = len(classes)
     print(f"[INFO] X={X.shape} y={y.shape} classes={C}")
 
-    if args.zero_face:
-        # pose(75) + face(210) + left(63) + right(63) = 411
-        face_start = 75
-        face_end = 75 + 210
-        if D >= face_end:
-            X[:, :, face_start:face_end] = 0.0
-            print("[INFO] zero_face enabled (face slice -> 0)")
-        else:
-            print("[WARN] zero_face requested but D mismatch; skipped")
+    # === counts (build_dataset.py가 저장함) ===
+    left_cnt  = int(data.get("leftHand_count", 21))
+    right_cnt = int(data.get("rightHand_count", 21))
+    pose_cnt  = int(data.get("pose_count", 25))
+    face_cnt  = int(data.get("face_count", 70))
 
-    # split (stratified)
+    left_dim  = left_cnt * 3
+    right_dim = right_cnt * 3
+    pose_dim  = pose_cnt * 3
+    face_dim  = face_cnt * 3
+
+    # build_dataset.py의 순서: leftHand -> rightHand -> pose -> face
+    face_start = left_dim + right_dim + pose_dim
+    face_end = face_start + face_dim
+
+    if args.zero_face:
+        if D >= face_end and face_dim > 0:
+            X[:, :, face_start:face_end] = 0.0
+            print(f"[INFO] zero_face enabled: slice [{face_start}:{face_end}] -> 0")
+        else:
+            print(f"[WARN] zero_face requested but D mismatch or face_dim=0; skipped (D={D}, face_end={face_end}, face_dim={face_dim})")
+
+    # split
     X_train, X_tmp, y_train, y_tmp = train_test_split(
         X, y, test_size=0.30, random_state=args.seed, stratify=y
     )
@@ -132,7 +142,7 @@ def main():
         X_tmp, y_tmp, test_size=0.50, random_state=args.seed, stratify=y_tmp
     )
 
-    # standardize features (fit on train only)
+    # standardize (fit train only)
     scaler = StandardScaler()
     scaler.fit(X_train.reshape(-1, D))
 
@@ -173,7 +183,6 @@ def main():
 
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
-
             optim.zero_grad()
             logits = model(xb)
             loss = crit(logits, yb)
@@ -208,7 +217,10 @@ def main():
             patience_left -= 1
 
         if epoch == 1 or epoch % 5 == 0:
-            print(f"[E{epoch:03d}] loss={tr_loss:.4f} tr_acc={tr_acc:.4f} val_acc={va_acc:.4f} best={best_val:.4f} (pat={patience_left})")
+            print(
+                f"[E{epoch:03d}] loss={tr_loss:.4f} tr_acc={tr_acc:.4f} "
+                f"val_acc={va_acc:.4f} best={best_val:.4f} (pat={patience_left})"
+            )
 
         if patience_left <= 0:
             print(f"[EARLY STOP] best_epoch={best_epoch} best_val={best_val:.4f}")
@@ -244,16 +256,24 @@ def main():
         json.dump({"classes": classes}, f, ensure_ascii=False, indent=2)
     print(f"[SAVED] {labels_path}")
 
-    # save model config for server
+    # save config (IMPORTANT: T 저장)
     cfg_path = os.path.join(args.out_dir, "attn_config.json")
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(
             {
+                "T": int(T),
                 "input_dim": int(D),
                 "hidden": int(args.hidden),
                 "layers": int(args.layers),
                 "dropout": float(args.dropout),
                 "zero_face": bool(args.zero_face),
+                "modality_order": ["leftHand", "rightHand", "pose", "face"],
+                "counts": {
+                    "leftHand": int(left_cnt),
+                    "rightHand": int(right_cnt),
+                    "pose": int(pose_cnt),
+                    "face": int(face_cnt),
+                },
             },
             f,
             ensure_ascii=False,
