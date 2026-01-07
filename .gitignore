@@ -82,3 +82,6 @@ outputs/
 wandb/
 mlruns/
 logs/
+
+dataset_1h/
+dataset_2h/

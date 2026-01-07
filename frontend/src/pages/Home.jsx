@@ -38,12 +38,35 @@ export default function Home() {
                 className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-4 ring-1 ring-slate-200 hover:bg-slate-100"
               >
                 <span className="font-semibold text-slate-900">
-                  영상 추출
+                  랜드마크 추출 카메라
                 </span>
                 <span className="text-slate-400">→</span>
               </Link>
             </li>
 
+            <li>
+              <Link
+                to="/translatorCamAuto"
+                className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-4 ring-1 ring-slate-200 hover:bg-slate-100"
+              >
+                <span className="font-semibold text-slate-900">
+                  수어 번역 카메라
+                </span>
+                <span className="text-slate-400">→</span>
+              </Link>
+            </li>
+
+            <li>
+              <Link
+                to="/testOnnx"
+                className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-4 ring-1 ring-slate-200 hover:bg-slate-100"
+              >
+                <span className="font-semibold text-slate-900">
+                  테스트
+                </span>
+                <span className="text-slate-400">→</span>
+              </Link>
+            </li>
             <li>
               <Link
                 to="/camera"

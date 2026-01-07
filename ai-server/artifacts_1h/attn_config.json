@@ -1,0 +1,8 @@
+{
+  "T": 60,
+  "input_dim": 411,
+  "hidden": 128,
+  "layers": 2,
+  "dropout": 0.35,
+  "zero_face": true
+}

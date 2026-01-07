@@ -1,182 +1,221 @@
+# app/server.py
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .attn_classifier import AttnLSTMRunner
+from app.attn_classifier import AttnLSTMRunner
+from .template_classifier import seq_to_matrix  # (left,right,pose,face) + xyz
 
 # ----------------------------
-# Paths (env override 가능)
+# Artifact dirs (1H / 2H)
 # ----------------------------
-BASE_DIR = Path(__file__).resolve().parent.parent  # ai-server/
-ART_DIR = Path(os.getenv("ARTIFACTS_DIR", str(BASE_DIR / "artifacts")))
+ART_1H = Path("artifacts_1h")
+ART_2H = Path("artifacts_2h")
 
-MODEL_PATH = Path(os.getenv("ATTN_MODEL", str(ART_DIR / "attn_lstm.pt")))
-SCALER_PATH = Path(os.getenv("ATTN_SCALER", str(ART_DIR / "attn_scaler.npz")))
-LABELS_PATH = Path(os.getenv("ATTN_LABELS", str(ART_DIR / "labels.json")))
-CONFIG_PATH = Path(os.getenv("ATTN_CONFIG", str(ART_DIR / "attn_config.json")))
+def _paths(art_dir: Path):
+    return (
+        art_dir / "attn_lstm.pt",
+        art_dir / "attn_scaler.npz",
+        art_dir / "labels.json",
+        art_dir / "attn_config.json",
+    )
 
-# expected fixed dims (프론트 기준)
-POSE_LEN = 25 * 3   # 75
-FACE_LEN = 70 * 3   # 210
-HAND_LEN = 21 * 3   # 63
-
-app = FastAPI(title="Sign Translation API", version="1.0.0")
+# ----------------------------
+# FastAPI
+# ----------------------------
+app = FastAPI(title="Sign Translation API (Auto)", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 배포 시 제한 권장
+    allow_origins=["*"],  # 개발용
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class PredictRequest(BaseModel):
-    frames: List[Dict[str, Any]]
+runner_1h: Optional[AttnLSTMRunner] = None
+runner_2h: Optional[AttnLSTMRunner] = None
 
-RUNNER: Optional[AttnLSTMRunner] = None
+
+class Hint(BaseModel):
+    # 프론트가 보내줘도 되고, 안 보내도 서버가 frames로 다시 계산함
+    maxHandsSeen: Optional[int] = None
+    bothRatio: Optional[float] = None
+
+
+class PredictRequest(BaseModel):
+    frames: List[Dict[str, Any]] = Field(..., description="frames: list of {leftHand,rightHand,pose,face}")
+    hint: Optional[Hint] = None
+
 
 @app.on_event("startup")
 def _startup():
-    global RUNNER
-    RUNNER = AttnLSTMRunner(
-        model_path=MODEL_PATH,
-        scaler_path=SCALER_PATH,
-        labels_path=LABELS_PATH,
-        config_path=CONFIG_PATH,
-        device=os.getenv("DEVICE", "cpu"),
-    )
+    global runner_1h, runner_2h
+
+    # 1H
+    m, s, l, c = _paths(ART_1H)
+    miss = [str(p) for p in [m, s, l, c] if not p.exists()]
+    if miss:
+        raise RuntimeError(f"[1H] Missing artifacts: {miss}")
+    runner_1h = AttnLSTMRunner(model_path=m, scaler_path=s, labels_path=l, config_path=c, device="cpu")
+
+    # 2H
+    m2, s2, l2, c2 = _paths(ART_2H)
+    miss2 = [str(p) for p in [m2, s2, l2, c2] if not p.exists()]
+    if miss2:
+        raise RuntimeError(f"[2H] Missing artifacts: {miss2}")
+    runner_2h = AttnLSTMRunner(model_path=m2, scaler_path=s2, labels_path=l2, config_path=c2, device="cpu")
+
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    assert runner_1h is not None and runner_2h is not None
+    return {
+        "ok": True,
+        "1h": {"T": runner_1h.T, "D": runner_1h.D, "art": str(ART_1H)},
+        "2h": {"T": runner_2h.T, "D": runner_2h.D, "art": str(ART_2H)},
+    }
 
-def _is_number(x: Any) -> bool:
-    return isinstance(x, (int, float)) and np.isfinite(x)
 
-def _coerce_flat(val: Any, expected_len: int, point_count: int) -> List[float]:
+# ----------------------------
+# Auto routing helpers
+# ----------------------------
+def _is_nonzero_vec(v: Any, eps: float = 1e-8) -> bool:
+    if not isinstance(v, list) or len(v) == 0:
+        return False
+    # 빠르게 0인지 검사(대부분은 0이 길게 이어짐)
+    # abs(v) > eps 가 하나라도 있으면 True
+    for x in v:
+        if isinstance(x, (int, float)) and abs(float(x)) > eps:
+            return True
+    return False
+
+
+def compute_both_ratio(frames: List[Dict[str, Any]]) -> Dict[str, float]:
     """
-    val이 아래 중 무엇이든 expected_len 길이의 float list로 변환:
-      1) flat 숫자 배열: [x,y,c,x,y,c,...]
-      2) landmarks list: [{x,y,z or visibility/presence}, ...]
-      3) landmarks list: [[x,y,z?], ...]
-      4) dict wrapper: {"landmarks":[...]} / {"points":[...]}
-    실패하면 0으로 채움.
+    bothRatio = (left nonzero AND right nonzero) / T
+    anyRatio  = (left nonzero OR  right nonzero) / T
     """
-    if val is None:
-        return [0.0] * expected_len
+    if not frames:
+        return {"bothRatio": 0.0, "anyRatio": 0.0}
 
-    if isinstance(val, dict):
-        if "landmarks" in val:
-            val = val["landmarks"]
-        elif "points" in val:
-            val = val["points"]
+    both = 0
+    anyh = 0
+    T = len(frames)
+    for fr in frames:
+        lh = _is_nonzero_vec((fr or {}).get("leftHand"))
+        rh = _is_nonzero_vec((fr or {}).get("rightHand"))
+        if lh or rh:
+            anyh += 1
+        if lh and rh:
+            both += 1
+    return {
+        "bothRatio": both / T,
+        "anyRatio": anyh / T,
+    }
 
-    # already flat numeric (exact)
-    if isinstance(val, list) and len(val) == expected_len and all(_is_number(x) for x in val):
-        return [float(x) for x in val]
 
-    # flat numeric but length mismatch (tolerant)
-    if isinstance(val, list) and len(val) > 0 and all(_is_number(x) for x in val):
-        arr = [float(x) for x in val]
-        if len(arr) >= expected_len:
-            return arr[:expected_len]
-        return arr + [0.0] * (expected_len - len(arr))
-
-    # landmarks list -> flatten
-    if isinstance(val, list) and len(val) == point_count:
-        out: List[float] = []
-        for p in val:
-            if isinstance(p, dict):
-                x = float(p.get("x", 0.0))
-                y = float(p.get("y", 0.0))
-                z = p.get("z", p.get("visibility", p.get("presence", 0.0)))
-                z = float(z) if _is_number(z) else 0.0
-                out.extend([x, y, z])
-            elif isinstance(p, (list, tuple)) and len(p) >= 2:
-                x = float(p[0])
-                y = float(p[1])
-                z = float(p[2]) if (len(p) >= 3 and _is_number(p[2])) else 0.0
-                out.extend([x, y, z])
-            else:
-                out.extend([0.0, 0.0, 0.0])
-
-        if len(out) == expected_len:
-            return out
-
-    return [0.0] * expected_len
-
-def _get_any(frame: Dict[str, Any], keys: List[str]) -> Any:
-    for k in keys:
-        if k in frame:
-            return frame[k]
-    return None
-
-def frames_to_matrix(frames: List[Dict[str, Any]], T: int, D: int) -> np.ndarray:
+def choose_mode(frames: List[Dict[str, Any]], hint: Optional[Hint]) -> str:
     """
-    IMPORTANT:
-      학습(build_dataset.py) 순서가 leftHand -> rightHand -> pose -> face 였으므로,
-      서버도 반드시 동일 순서로 concat해야 scaler/모델과 정합됨.
+    선택 규칙(실전형):
+      - 손이 거의 안 잡히면 (anyRatio 낮음) -> 1h로 보내도 의미 없으니 400 처리
+      - 둘 다 비율이 어느 정도면 -> 2h
+      - 아니면 -> 1h
     """
-    X = np.zeros((T, D), dtype=np.float32)
+    stats = compute_both_ratio(frames)
+    both_ratio = stats["bothRatio"]
+    any_ratio = stats["anyRatio"]
 
-    n = min(len(frames), T)
-    for i in range(n):
-        fr = frames[i] or {}
+    # 힌트가 있으면 보정(있어도 서버 계산이 우선)
+    if hint is not None:
+        if hint.bothRatio is not None and np.isfinite(hint.bothRatio):
+            both_ratio = max(both_ratio, float(hint.bothRatio))
+        # maxHandsSeen이 2면 2h 쪽으로 가중
+        if hint.maxHandsSeen == 2:
+            both_ratio = max(both_ratio, 0.25)
 
-        left_val = _get_any(fr, ["leftHand", "left_hand", "left", "handLeft"])
-        right_val = _get_any(fr, ["rightHand", "right_hand", "right", "handRight"])
-        pose_val = _get_any(fr, ["pose", "poseLandmarks", "pose_landmarks"])
-        face_val = _get_any(fr, ["face", "faceLandmarks", "face_landmarks"])
+    if any_ratio < 0.10:
+        # 손이 10% 미만 프레임에서만 보이면 캡처가 실패한 케이스
+        raise HTTPException(status_code=400, detail=f"Hand not detected enough (anyRatio={any_ratio:.3f})")
 
-        left = _coerce_flat(left_val, HAND_LEN, 21)
-        right = _coerce_flat(right_val, HAND_LEN, 21)
-        pose = _coerce_flat(pose_val, POSE_LEN, 25)
-        face = _coerce_flat(face_val, FACE_LEN, 70)
+    # 2손이 20% 이상 프레임에서 동시에 잡히면 2H로 간주
+    return "2h" if both_ratio >= 0.20 else "1h"
 
-        # ★ 학습과 동일 concat 순서
-        vec = np.array(left + right + pose + face, dtype=np.float32)
 
-        if vec.size != D:
-            if vec.size > D:
-                vec = vec[:D]
-            else:
-                vec = np.concatenate([vec, np.zeros((D - vec.size,), dtype=np.float32)], axis=0)
+def run_predict(runner: AttnLSTMRunner, frames: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # seq_to_matrix가 (T,411) 만들어줌. T는 runner.T로 맞춰준다.
+    X = seq_to_matrix(frames, T=runner.T)
+    out = runner.predict(X)
+    return out
 
-        X[i] = vec
 
-    return X
+# ----------------------------
+# Endpoints
+# ----------------------------
+@app.post("/predict/1h")
+def predict_1h(req: PredictRequest):
+    assert runner_1h is not None
+    if not req.frames:
+        raise HTTPException(status_code=400, detail="frames is empty")
 
-@app.post("/predict")
-def predict(req: PredictRequest):
-    assert RUNNER is not None, "Runner not initialized"
+    out = run_predict(runner_1h, req.frames)
+    return {
+        "mode": "1h",
+        "label": out["label"],
+        "confidence": float(out["confidence"]),
+        "text": out["label"],
+        "top5": out["top5"],
+        "pred_idx": out.get("pred_idx"),
+    }
 
-    X = frames_to_matrix(req.frames, T=RUNNER.T, D=RUNNER.D)
 
-    if os.getenv("DEBUG_INPUT", "0") == "1":
-        # 손 영역 평균이 0에 가까우면 사실상 손이 안 들어온 것
-        left_right = X[:, : (63 + 63)]
-        print(
-            f"[DEBUG_INPUT] X: min={float(X.min()):.6f} max={float(X.max()):.6f} mean={float(X.mean()):.6f} "
-            f"| hands_abs_mean={float(np.abs(left_right).mean()):.6f}"
-        )
+@app.post("/predict/2h")
+def predict_2h(req: PredictRequest):
+    assert runner_2h is not None
+    if not req.frames:
+        raise HTTPException(status_code=400, detail="frames is empty")
 
-    out = RUNNER.predict(X)
+    out = run_predict(runner_2h, req.frames)
+    return {
+        "mode": "2h",
+        "label": out["label"],
+        "confidence": float(out["confidence"]),
+        "text": out["label"],
+        "top5": out["top5"],
+        "pred_idx": out.get("pred_idx"),
+    }
 
-    label = out.get("label") or out.get("pred") or "unknown"
-    conf = float(out.get("confidence", 0.0))
-    top5 = out.get("top5", [])
+
+@app.post("/predict/auto")
+def predict_auto(req: PredictRequest):
+    assert runner_1h is not None and runner_2h is not None
+    if not req.frames:
+        raise HTTPException(status_code=400, detail="frames is empty")
+
+    mode = choose_mode(req.frames, req.hint)
+    stats = compute_both_ratio(req.frames)
+
+    runner = runner_2h if mode == "2h" else runner_1h
+    out = run_predict(runner, req.frames)
 
     return {
-        "label": label,
-        "confidence": conf,
-        "text": label,
-        "top5": top5,
-        "pred_idx": out.get("pred_idx", None),
+        "mode": mode,
+        "label": out["label"],
+        "confidence": float(out["confidence"]),
+        "text": out["label"],
+        "top5": out["top5"],
+        "pred_idx": out.get("pred_idx"),
+        "debug": {
+            "bothRatio": stats["bothRatio"],
+            "anyRatio": stats["anyRatio"],
+            "T_in": len(req.frames),
+            "T_model": runner.T,
+            "D_model": runner.D,
+        },
     }
