@@ -1,0 +1,14 @@
+{
+  "classes": [
+    "call",
+    "drink",
+    "eat",
+    "fine",
+    "go",
+    "me",
+    "no",
+    "stop",
+    "wait",
+    "yes"
+  ]
+}

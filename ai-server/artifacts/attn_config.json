@@ -1,0 +1,7 @@
+{
+  "input_dim": 411,
+  "hidden": 96,
+  "layers": 2,
+  "dropout": 0.35,
+  "zero_face": true
+}
