@@ -7,158 +7,166 @@ const HAND_MODEL =
 const POSE_MODEL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 
-const FRAMES = 30; // 30프레임 녹화
-
-<<<<<<< HEAD
-// fixed sizes
-const ZERO75 = Array(25 * 3).fill(0); // pose 25*3
-const ZERO63 = Array(21 * 3).fill(0); // hand 21*3
-const ZERO210 = Array(70 * 3).fill(0); // face 70*3 (일단 0, 다음 단계에서 매핑 붙임)
-
-// ✅ 셀피 카메라처럼 좌우 반전해서 보고 싶으면 true
-const MIRROR = false;
-
-// ✅ 손 연결(21개 랜드마크 연결선)
-const HAND_CONNECTIONS = [
-  [0, 1],
-  [1, 2],
-  [2, 3],
-  [3, 4],
-  [0, 5],
-  [5, 6],
-  [6, 7],
-  [7, 8],
-  [5, 9],
-  [9, 10],
-  [10, 11],
-  [11, 12],
-  [9, 13],
-  [13, 14],
-  [14, 15],
-  [15, 16],
-  [13, 17],
-  [17, 18],
-  [18, 19],
-  [19, 20],
-  [0, 17],
-];
-
-// ✅ 포즈(0~24만 쓰는 현재 코드에 맞춘 상체 위주 연결선)
-const POSE_CONNECTIONS_0_24 = [
-  [11, 12], // shoulders
-  [11, 13],
-  [13, 15], // left arm
-  [12, 14],
-  [14, 16], // right arm
-  [11, 23],
-  [12, 24], // shoulders -> hips
-  [23, 24], // hips
-  [15, 17],
-  [15, 19],
-  [15, 21], // left wrist -> fingers
-  [16, 18],
-  [16, 20],
-  [16, 22], // right wrist -> fingers
-];
-
-function toFlatXYZ(landmarks, w, h, conf = 1) {
-=======
-// ✅ 기본은 Spring(8080) -> 내부에서 FastAPI(/predict) 호출하게 해둔 상태
-// 필요하면 여기만 바꿔.
 const API_URL = "http://127.0.0.1:8080/api/translate";
-// const API_URL = "http://127.0.0.1:8000/predict";
 
-// 너의 feature D=411 = pose(25*3=75) + face(70*3=210) + left(63) + right(63)
+// ===== 모델 입력 고정 =====
+const TARGET_FRAMES = 30;
+
+// ===== 캡처 정책 =====
+// 작은 동작 살리려면 raw를 고FPS로 모으고, 끝에 30프레임으로 리샘플.
+const CAPTURE_MS = 3000;
+
+// 너무 고FPS로 저장하면 브라우저 부담될 수 있어서 상한(권장 30~60)
+// 0이면 rAF 그대로(보통 60fps)
+const RAW_FPS_CAP = 60;
+const RAW_INTERVAL_MS = RAW_FPS_CAP > 0 ? 1000 / RAW_FPS_CAP : 0;
+
+// ===== fixed sizes: pose75 + face210 + left63 + right63 = 411 =====
 const ZERO75 = Array(25 * 3).fill(0);
 const ZERO63 = Array(21 * 3).fill(0);
 const ZERO210 = Array(70 * 3).fill(0);
 
-// ---- utils ----
-function clamp01(v) {
-  if (!Number.isFinite(v)) return 0;
-  return Math.max(0, Math.min(1, v));
+// ---------- helpers ----------
+function isFiniteNumber(x) {
+  return typeof x === "number" && Number.isFinite(x);
 }
 
-/**
- * IMPORTANT
- * 학습 데이터(JSON) 값들이 0~1 normalized 형태면,
- * 프론트도 "픽셀로 곱하지 말고" normalized 그대로 보내는 게 맞음.
- *
- * dataset 예시 값이 0.3~0.9대인 걸로 봐서 normalized가 맞아 보임.
- */
-function toFlatXYC_Normalized(landmarks, confFallback = 1) {
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
+// NOTE:
+// 학습 데이터가 (x,y,visibility/presence)였으면 이대로.
+// 학습이 (x,y,z)였다면 c 대신 lm.z를 넣어야 분포가 맞음.
+function toFlatXYZNormalized(landmarks, confDefault = 1) {
   const out = [];
   for (let i = 0; i < landmarks.length; i++) {
-    const lm = landmarks[i] || {};
-    const x = clamp01(lm.x ?? 0);
-    const y = clamp01(lm.y ?? 0);
-    // 너 포맷(3번째 값) = visibility/presence/1
-    const c =
-      (Number.isFinite(lm.visibility) ? lm.visibility : undefined) ??
-      (Number.isFinite(lm.presence) ? lm.presence : undefined) ??
-      confFallback ??
-      1;
+    const lm = landmarks[i];
+    const x = lm?.x ?? 0;
+    const y = lm?.y ?? 0;
+    const c = (lm?.visibility ?? lm?.presence ?? confDefault ?? 1) || 1;
     out.push(x, y, c);
   }
   return out;
 }
 
-<<<<<<< HEAD
-// ✅ 그리기 유틸
-function normToPx(lm, w, h, mirror) {
-  const nx = lm?.x ?? 0;
-  const ny = lm?.y ?? 0;
-  const x = (mirror ? 1 - nx : nx) * w;
-  const y = ny * h;
-  return { x, y };
+function deepCloneFrames(frames) {
+  return frames.map((f) => ({
+    pose: Array.isArray(f.pose) ? [...f.pose] : [...ZERO75],
+    face: Array.isArray(f.face) ? [...f.face] : [...ZERO210],
+    leftHand: Array.isArray(f.leftHand) ? [...f.leftHand] : [...ZERO63],
+    rightHand: Array.isArray(f.rightHand) ? [...f.rightHand] : [...ZERO63],
+  }));
 }
 
-function drawPoints(ctx, landmarks, w, h, { mirror = false, r = 3 } = {}) {
-  for (const lm of landmarks) {
-    const { x, y } = normToPx(lm, w, h, mirror);
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
+function concatStats(frames) {
+  if (!frames?.length) return { min: 0, max: 0, mean: 0 };
+  let min = Infinity,
+    max = -Infinity,
+    sum = 0,
+    cnt = 0;
+
+  for (const fr of frames) {
+    const arr = []
+      .concat(fr.pose || [], fr.face || [], fr.leftHand || [], fr.rightHand || []);
+    for (const v of arr) {
+      if (!isFiniteNumber(v)) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
+      sum += v;
+      cnt += 1;
+    }
   }
+  const mean = cnt ? sum / cnt : 0;
+  return { min: Number.isFinite(min) ? min : 0, max: Number.isFinite(max) ? max : 0, mean };
 }
 
-function drawConnections(ctx, landmarks, connections, w, h, { mirror = false } = {}) {
-  for (const [a, b] of connections) {
-    const lma = landmarks[a];
-    const lmb = landmarks[b];
-    if (!lma || !lmb) continue;
-    const p1 = normToPx(lma, w, h, mirror);
-    const p2 = normToPx(lmb, w, h, mirror);
-    ctx.beginPath();
-    ctx.moveTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
-  }
-=======
-function energy(arr) {
-  if (!Array.isArray(arr) || arr.length === 0) return 0;
-  let s = 0;
-  for (let i = 0; i < arr.length; i++) s += Math.abs(arr[i] || 0);
-  return s;
+function hasAnyNonZero(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return false;
+  for (const v of arr) if (isFiniteNumber(v) && v !== 0) return true;
+  return false;
 }
 
 /**
- * hold-last:
- * - 랜드마크가 1~2프레임 끊길 때 0으로 떨어지는 걸 방지
+ * 시간축 기준 리샘플
+ * - frames: [{t, pose, face, leftHand, rightHand}, ...] (t는 ms)
+ * - startT~endT를 TARGET_FRAMES개로 균등 분할하고, 각 시점에 가장 가까운 프레임을 선택
  */
-function chooseWithHold(current, last, holdLeftRef, holdMax = 6) {
-  const e = energy(current);
-  if (e > 0) {
-    holdLeftRef.current = holdMax;
-    return current;
+function resampleByTime(frames, startT, endT, targetN) {
+  if (!frames?.length) {
+    // fallback: 전부 0
+    return Array.from({ length: targetN }, () => ({
+      pose: [...ZERO75],
+      face: [...ZERO210],
+      leftHand: [...ZERO63],
+      rightHand: [...ZERO63],
+    }));
   }
-  if (holdLeftRef.current > 0 && energy(last) > 0) {
-    holdLeftRef.current -= 1;
-    return last;
+
+  const src = frames.slice().sort((a, b) => (a.t ?? 0) - (b.t ?? 0));
+  const out = [];
+
+  const span = Math.max(1, endT - startT);
+  let j = 0;
+
+  for (let i = 0; i < targetN; i++) {
+    const targetT = startT + (span * i) / (targetN - 1);
+
+    while (j + 1 < src.length && src[j + 1].t <= targetT) j++;
+
+    // j 또는 j+1 중 더 가까운 것 선택
+    const a = src[j];
+    const b = src[Math.min(j + 1, src.length - 1)];
+    const choose =
+      Math.abs((a.t ?? 0) - targetT) <= Math.abs((b.t ?? 0) - targetT) ? a : b;
+
+    out.push({
+      pose: [...(choose.pose || ZERO75)],
+      face: [...(choose.face || ZERO210)],
+      leftHand: [...(choose.leftHand || ZERO63)],
+      rightHand: [...(choose.rightHand || ZERO63)],
+    });
   }
-  return current;
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
+
+  return out;
+}
+
+// ======= Landmark drawing =======
+const HAND_CONNECTIONS = [
+  [0, 1],[1, 2],[2, 3],[3, 4],
+  [0, 5],[5, 6],[6, 7],[7, 8],
+  [0, 9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+];
+
+const POSE_CONNECTIONS = [
+  [11,12],[11,13],[13,15],[12,14],[14,16],
+  [11,23],[12,24],[23,24],
+  [23,25],[25,27],[24,26],[26,28],
+];
+
+function drawLandmarks(ctx, pts, w, h, connections) {
+  if (!pts || pts.length === 0) return;
+
+  // lines
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(0,255,0,0.85)";
+  ctx.beginPath();
+  for (const [a, b] of connections) {
+    const pa = pts[a], pb = pts[b];
+    if (!pa || !pb) continue;
+    ctx.moveTo(pa.x * w, pa.y * h);
+    ctx.lineTo(pb.x * w, pb.y * h);
+  }
+  ctx.stroke();
+
+  // points
+  ctx.fillStyle = "rgba(255,0,0,0.9)";
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (!p) continue;
+    const x = p.x * w, y = p.y * h;
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 export default function TranslatorCam() {
@@ -166,68 +174,51 @@ export default function TranslatorCam() {
   const canvasRef = useRef(null);
   const rafRef = useRef(null);
 
-  const handRef = useRef(null);
-  const poseRef = useRef(null);
-
   const [ready, setReady] = useState(false);
-  const [running, setRunning] = useState(false);
+  const [camOn, setCamOn] = useState(false);
 
-  const framesRef = useRef([]); // 캡처된 프레임 버퍼
-  const sentFramesRef = useRef(0); // Stop 때 보낸 프레임 수
+  // UI 상태
+  const [armedUI, setArmedUI] = useState(false);
+  const [recordingUI, setRecordingUI] = useState(false);
+  const [captured, setCaptured] = useState(false);
 
-  // 결과 UI
+  const [framesCount, setFramesCount] = useState(0); // 최종 30 기준 카운트(완료 시 30)
+  const [rawCount, setRawCount] = useState(0);       // raw로 몇 개 모였는지
+  const [msLeft, setMsLeft] = useState(0);
+
+  const [dbg, setDbg] = useState({ min: 0, max: 0, mean: 0, handCount: 0 });
+
   const [label, setLabel] = useState("-");
   const [text, setText] = useState("-");
   const [confidence, setConfidence] = useState(0);
   const [top5UI, setTop5UI] = useState([]);
 
-<<<<<<< HEAD
-  const framesRef = useRef([]); // last 30 frames
-  const inFlightRef = useRef(false); // avoid spam
-  const lastSendAtRef = useRef(0);
+  // buffers
+  const rawFramesRef = useRef([]);     // 고FPS 원본
+  const finalFramesRef = useRef([]);   // 리샘플 30프레임
+  const inFlightRef = useRef(false);
 
-  // ✅ 저장 버튼 활성화/표시용
-  const [framesCount, setFramesCount] = useState(0);
+  // mediapipe
+  const handRef = useRef(null);
+  const poseRef = useRef(null);
 
-  // ✅ 키워드 입력 + 촬영 시작 시 고정될 키워드
-  const [keyword, setKeyword] = useState("");
-  const keywordFixedRef = useRef(""); // Start 시점의 keyword를 고정 저장
+  // loop flags
+  const runningRef = useRef(false);
 
-  // ✅ 파일명 숫자 시퀀스 (localStorage에 유지)
-  const COUNTER_KEY = "translatorcam_clip_seq";
-  function nextSeq() {
-    const cur = Number(localStorage.getItem(COUNTER_KEY) ?? "0");
-    const next = cur + 1;
-    localStorage.setItem(COUNTER_KEY, String(next));
-    return next;
-  }
-  function pad6(n) {
-    return String(n).padStart(6, "0");
-  }
+  // closure-proof state refs
+  const armedRef = useRef(false);
+  const recordingRef = useRef(false);
 
-  // streak smoothing
-  const lastLabelRef = useRef(null);
-  const streakRef = useRef(0);
-=======
-  // 디버그 UI
-  const [dbg, setDbg] = useState({
-    poseE: 0,
-    leftE: 0,
-    rightE: 0,
-    handCount: 0,
-  });
+  // capture timing
+  const captureStartRef = useRef(0);
+  const captureEndRef = useRef(0);
+  const lastRawPushRef = useRef(0);
 
-  // timestamp monotonic (MediaPipe VIDEO 모드에서 중요)
-  const lastTsRef = useRef(0);
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
-
-  // hold-last refs
-  const lastPoseRef = useRef(ZERO75);
-  const lastLeftRef = useRef(ZERO63);
-  const lastRightRef = useRef(ZERO63);
-  const holdPoseRef = useRef(0);
-  const holdLeftHandRef = useRef(0);
-  const holdRightHandRef = useRef(0);
+  // hold-last hands (짧은 미검출 구간 완화)
+  const lastLeftRef = useRef([...ZERO63]);
+  const lastRightRef = useRef([...ZERO63]);
+  const missLeftRef = useRef(0);
+  const missRightRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -247,7 +238,6 @@ export default function TranslatorCam() {
       });
 
       if (cancelled) return;
-
       handRef.current = hand;
       poseRef.current = pose;
       setReady(true);
@@ -263,97 +253,9 @@ export default function TranslatorCam() {
     };
   }, []);
 
-  // ✅ JSON 다운로드 유틸 + 저장 함수 (Save 버튼 눌렀을 때만 실행)
-  function downloadJson(obj, filename) {
-    const blob = new Blob([JSON.stringify(obj)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  function saveClipToFile() {
-    const clip = framesRef.current.slice(0, FRAMES);
-    if (clip.length < FRAMES) return;
-
-    const seq = nextSeq(); // ✅ 1,2,3...
-    const filename = `${pad6(seq)}.json`; // ✅ 000001.json, 000002.json ...
-
-    const now = new Date();
-    const payload = {
-      version: 1,
-      seq, // ✅ 파일명과 매칭
-      createdAt: now.toISOString(),
-      keyword: keywordFixedRef.current, // ✅ 입력 키워드 같이 저장
-      frames: clip,
-      lastPrediction: { label, text, confidence: conf },
-    };
-
-    downloadJson(payload, filename);
-  }
-
-  function clearCanvas() {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext?.("2d");
-    if (!canvas || !ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }
-
-  function drawOverlay({ handRes, poseRes, w, h }) {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext?.("2d");
-    if (!canvas || !ctx) return;
-
-    // 캔버스 픽셀 좌표계를 비디오 원본 해상도에 맞춤
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
-
-    ctx.clearRect(0, 0, w, h);
-
-    ctx.save();
-    ctx.lineWidth = 2;
-
-    // --- pose
-    const poseLm = poseRes?.landmarks?.[0];
-    if (poseLm?.length) {
-      const p = poseLm.slice(0, 25);
-
-      ctx.strokeStyle = "rgba(0, 255, 255, 0.75)";
-      drawConnections(ctx, p, POSE_CONNECTIONS_0_24, w, h, { mirror: MIRROR });
-
-      ctx.fillStyle = "rgba(0, 255, 255, 0.95)";
-      drawPoints(ctx, p, w, h, { mirror: MIRROR, r: 3 });
-    }
-
-    // --- hands
-    if (handRes?.landmarks?.length) {
-      for (let i = 0; i < handRes.landmarks.length; i++) {
-        const lm = handRes.landmarks[i];
-        const handed = handRes.handednesses?.[i]?.[0]?.categoryName; // "Left"/"Right"
-
-        const color =
-          handed === "Left"
-            ? { stroke: "rgba(255, 0, 255, 0.75)", fill: "rgba(255, 0, 255, 0.95)" }
-            : handed === "Right"
-            ? { stroke: "rgba(0, 255, 0, 0.75)", fill: "rgba(0, 255, 0, 0.95)" }
-            : { stroke: "rgba(255, 255, 0, 0.75)", fill: "rgba(255, 255, 0, 0.95)" };
-
-        ctx.strokeStyle = color.stroke;
-        drawConnections(ctx, lm, HAND_CONNECTIONS, w, h, { mirror: MIRROR });
-
-        ctx.fillStyle = color.fill;
-        drawPoints(ctx, lm, w, h, { mirror: MIRROR, r: 3 });
-      }
-    }
-
-    ctx.restore();
-  }
-
   async function startCam() {
+    if (!ready || camOn) return;
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -361,31 +263,49 @@ export default function TranslatorCam() {
       video: { facingMode: "user" },
       audio: false,
     });
+
     video.srcObject = stream;
     await video.play();
 
-    // reset buffers/state
-    framesRef.current = [];
-<<<<<<< HEAD
+    // resize canvas
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.width = video.videoWidth || 560;
+      canvas.height = video.videoHeight || 420;
+    }
+
+    // reset
+    rawFramesRef.current = [];
+    finalFramesRef.current = [];
+    setRawCount(0);
     setFramesCount(0);
-=======
-    sentFramesRef.current = 0;
+    setMsLeft(0);
+
+    armedRef.current = false;
+    recordingRef.current = false;
+    setArmedUI(false);
+    setRecordingUI(false);
+    setCaptured(false);
+
     setLabel("-");
     setText("-");
     setConfidence(0);
     setTop5UI([]);
 
-    lastPoseRef.current = ZERO75;
-    lastLeftRef.current = ZERO63;
-    lastRightRef.current = ZERO63;
-    holdPoseRef.current = 0;
-    holdLeftHandRef.current = 0;
-    holdRightHandRef.current = 0;
+    lastLeftRef.current = [...ZERO63];
+    lastRightRef.current = [...ZERO63];
+    missLeftRef.current = 0;
+    missRightRef.current = 0;
 
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
-    setRunning(true);
+    captureStartRef.current = 0;
+    captureEndRef.current = 0;
+    lastRawPushRef.current = 0;
+
+    runningRef.current = true;
+    setCamOn(true);
 
     const loop = () => {
+      if (!runningRef.current) return;
       rafRef.current = requestAnimationFrame(loop);
 
       const hand = handRef.current;
@@ -393,102 +313,161 @@ export default function TranslatorCam() {
       if (!hand || !pose) return;
       if (video.readyState < 2) return;
 
-      // monotonic timestamp 보장
-      let ts = performance.now();
-      if (ts <= lastTsRef.current) ts = lastTsRef.current + 1;
-      lastTsRef.current = ts;
+      const now = performance.now();
 
-      // ---- HANDS ----
-      const handRes = hand.detectForVideo(video, ts);
-      let left = ZERO63;
-      let right = ZERO63;
+      // detect
+      const handRes = hand.detectForVideo(video, now);
+      const poseRes = pose.detectForVideo(video, now);
 
-      const handCount = Array.isArray(handRes?.landmarks) ? handRes.landmarks.length : 0;
+      // draw overlay
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext("2d");
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
 
-      if (handCount) {
+        const posePts = poseRes?.landmarks?.[0] || [];
+        drawLandmarks(ctx, posePts, w, h, POSE_CONNECTIONS);
+
+        const handPtsList = handRes?.landmarks || [];
+        for (const pts of handPtsList) drawLandmarks(ctx, pts, w, h, HAND_CONNECTIONS);
+      }
+
+      // hands parsing
+      let left = null;
+      let right = null;
+      const handCount = handRes?.landmarks?.length ? handRes.landmarks.length : 0;
+      const handDetected = handCount > 0;
+
+      if (handDetected) {
         for (let i = 0; i < handRes.landmarks.length; i++) {
-          const lm = handRes.landmarks[i]; // 21 pts
+          const lm = handRes.landmarks[i];
           const handed = handRes.handednesses?.[i]?.[0]?.categoryName; // "Left"/"Right"
-          const flat = toFlatXYC_Normalized(lm, 1);
+          const flat = toFlatXYZNormalized(lm, 1);
 
           if (handed === "Left") left = flat;
           else if (handed === "Right") right = flat;
           else {
-            // fallback
-            if (energy(left) === 0) left = flat;
-            else if (energy(right) === 0) right = flat;
+            if (!left) left = flat;
+            else if (!right) right = flat;
           }
         }
       }
 
-      // hold-last 적용 (한두 프레임 끊겨도 0으로 갑자기 떨어지는 것 방지)
-      left = chooseWithHold(left, lastLeftRef.current, holdLeftHandRef, 6);
-      right = chooseWithHold(right, lastRightRef.current, holdRightHandRef, 6);
-      lastLeftRef.current = left;
-      lastRightRef.current = right;
+      // hold-last up to 5 frames
+      if (left) {
+        lastLeftRef.current = left;
+        missLeftRef.current = 0;
+      } else {
+        missLeftRef.current += 1;
+      }
+      if (right) {
+        lastRightRef.current = right;
+        missRightRef.current = 0;
+      } else {
+        missRightRef.current += 1;
+      }
 
-      // ---- POSE ----
-      const poseRes = pose.detectForVideo(video, ts);
+      const leftFinal = missLeftRef.current <= 5 ? lastLeftRef.current : ZERO63;
+      const rightFinal = missRightRef.current <= 5 ? lastRightRef.current : ZERO63;
+
+      const handActive = hasAnyNonZero(leftFinal) || hasAnyNonZero(rightFinal);
+
+      // pose
       let poseFlat = ZERO75;
-
       if (poseRes?.landmarks?.[0]?.length) {
         const p = poseRes.landmarks[0].slice(0, 25);
-        poseFlat = toFlatXYC_Normalized(p, 1);
+        poseFlat = toFlatXYZNormalized(p, 1);
       }
-
-<<<<<<< HEAD
-      // ✅ 여기서 오버레이 그리기
-      drawOverlay({ handRes, poseRes, w, h });
-
-      // --- face (0으로 임시 채움)
-=======
-      poseFlat = chooseWithHold(poseFlat, lastPoseRef.current, holdPoseRef, 6);
-      lastPoseRef.current = poseFlat;
-
-      // ---- FACE (일단 0 채움) ----
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
       const faceFlat = ZERO210;
 
-      const frame = {
-        pose: poseFlat,
-        face: faceFlat,
-        leftHand: left,
-        rightHand: right,
-      };
+      // 1) armed 상태에서 손이 처음 잡히는 순간 capture 시작
+      if (armedRef.current && !recordingRef.current) {
+        if (handDetected && handActive) {
+          rawFramesRef.current = [];
+          finalFramesRef.current = [];
+          setRawCount(0);
+          setFramesCount(0);
 
-      // ** 손, 포즈가 모두 있는 경우에만 프레임 추가 **
-      if (left !== ZERO63 && right !== ZERO63 && poseFlat !== ZERO75) {
-        const buf = framesRef.current;
-        buf.push(frame);
-        if (buf.length > FRAMES) buf.shift();
-        setFramesCount(buf.length);
+          captureStartRef.current = now;
+          captureEndRef.current = now + CAPTURE_MS;
+          lastRawPushRef.current = 0;
+
+          recordingRef.current = true;
+          armedRef.current = false;
+
+          setRecordingUI(true);
+          setArmedUI(false);
+          setCaptured(false);
+
+          setLabel("-");
+          setText("-");
+          setConfidence(0);
+          setTop5UI([]);
+        }
       }
 
-<<<<<<< HEAD
-      // 30프레임 차면 번역 요청
-      const canSend =
-        framesRef.current.length === FRAMES && !inFlightRef.current && now - lastSendAtRef.current > 200;
-      if (canSend) {
-        lastSendAtRef.current = now;
-        sendTranslate([...framesRef.current]);
+      // 2) recording 중이면 raw를 고FPS로 쌓기 (손이 잠깐 사라져도 hold-last로 값 유지)
+      if (recordingRef.current) {
+        const endT = captureEndRef.current;
+        const leftMs = Math.max(0, endT - now);
+        setMsLeft(Math.ceil(leftMs));
+
+        // FPS cap (옵션)
+        if (RAW_INTERVAL_MS > 0 && now - lastRawPushRef.current < RAW_INTERVAL_MS) {
+          // skip pushing but continue loop
+        } else {
+          lastRawPushRef.current = now;
+
+          const frame = {
+            t: now,
+            pose: [...poseFlat],
+            face: [...faceFlat],
+            leftHand: [...leftFinal],
+            rightHand: [...rightFinal],
+          };
+
+          rawFramesRef.current.push(frame);
+          setRawCount(rawFramesRef.current.length);
+        }
+
+        // capture 종료
+        if (now >= endT) {
+          recordingRef.current = false;
+          setRecordingUI(false);
+          setMsLeft(0);
+
+          const startT = captureStartRef.current;
+          const raw = rawFramesRef.current;
+
+          const sampled = resampleByTime(raw, startT, endT, TARGET_FRAMES);
+          finalFramesRef.current = sampled;
+
+          setFramesCount(sampled.length);
+          setCaptured(true);
+        }
       }
-=======
-      // debug
-      setDbg({
-        poseE: energy(poseFlat),
-        leftE: energy(left),
-        rightE: energy(right),
-        handCount,
-      });
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
+
+      // debug (raw 기준이 아니라 "현재 마지막 프레임/버퍼" 기준으로 보려면 raw를 쓰는 게 직관적)
+      const { min, max, mean } = concatStats(
+        finalFramesRef.current.length ? finalFramesRef.current : (rawFramesRef.current.slice(-30) || [])
+      );
+      setDbg({ min, max, mean, handCount });
     };
 
     rafRef.current = requestAnimationFrame(loop);
   }
 
-  async function stopAndPredict() {
-    // 1) 루프/캠 정지
-    setRunning(false);
+  function stopCam() {
+    runningRef.current = false;
+    setCamOn(false);
+
+    armedRef.current = false;
+    recordingRef.current = false;
+    setArmedUI(false);
+    setRecordingUI(false);
+    setMsLeft(0);
+
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
 
     const video = videoRef.current;
@@ -498,39 +477,67 @@ export default function TranslatorCam() {
       video.srcObject = null;
     }
 
-<<<<<<< HEAD
-    clearCanvas();
-    // ✅ Stop은 저장 절대 안 함
-=======
-    // 2) 마지막 FRAMES 프레임 준비(부족하면 0패딩)
-    const buf = framesRef.current || [];
-    const frames = buf.slice(-FRAMES);
-
-    while (frames.length < FRAMES) {
-      frames.unshift({
-        pose: ZERO75,
-        face: ZERO210,
-        leftHand: ZERO63,
-        rightHand: ZERO63,
-      });
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
-
-    sentFramesRef.current = frames.length;
-
-    // 디버그 로그 (네가 보던 것처럼 frames 같이 확인 가능)
-    const last = frames[frames.length - 1];
-    console.log("[STOP] frames len =", frames.length);
-    console.log("[STOP] lens pose/face/left/right =", last.pose.length, last.face.length, last.leftHand.length, last.rightHand.length);
-    console.log("[STOP] energy pose/left/right =", energy(last.pose), energy(last.leftHand), energy(last.rightHand));
-    console.log("[STOP] sample first6 left/pose/right =", last.leftHand.slice(0, 6), last.pose.slice(0, 6), last.rightHand.slice(0, 6));
-
-    // 3) 서버로 1번만 호출
-    await sendPredict(frames);
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
   }
 
-  async function sendPredict(frames) {
+  function record() {
+    if (!camOn) return;
+    if (armedRef.current || recordingRef.current) return;
+
+    // “예전 손”이 시작 조건 통과시키지 않게 reset
+    lastLeftRef.current = [...ZERO63];
+    lastRightRef.current = [...ZERO63];
+    missLeftRef.current = 999;
+    missRightRef.current = 999;
+
+    rawFramesRef.current = [];
+    finalFramesRef.current = [];
+    setRawCount(0);
+    setFramesCount(0);
+    setMsLeft(0);
+
+    armedRef.current = true;
+    recordingRef.current = false;
+
+    setArmedUI(true);
+    setRecordingUI(false);
+    setCaptured(false);
+
+    setLabel("-");
+    setText("-");
+    setConfidence(0);
+    setTop5UI([]);
+  }
+
+  async function sendPredict() {
+    if (!captured) return;
+    if (inFlightRef.current) return;
+
+    const frames = deepCloneFrames(finalFramesRef.current);
+    if (frames.length !== TARGET_FRAMES) {
+      console.warn(`[SEND] frames=${frames.length} (need ${TARGET_FRAMES})`);
+      return;
+    }
+
+    inFlightRef.current = true;
+
     try {
+      const first = frames[0];
+      console.log("[PREDICT] frames len=", frames.length);
+      console.log(
+        "[PREDICT] lens pose/face/left/right =",
+        first?.pose?.length,
+        first?.face?.length,
+        first?.leftHand?.length,
+        first?.rightHand?.length
+      );
+      console.log("[PREDICT] left first6 =", first?.leftHand?.slice(0, 6));
+      console.log("[PREDICT] right first6 =", first?.rightHand?.slice(0, 6));
+
       const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -543,45 +550,12 @@ export default function TranslatorCam() {
       }
 
       const data = await res.json();
-<<<<<<< HEAD
-      console.log("Server response:", data);
+      const outLabel = data?.label ?? "-";
+      const outText = data?.text ?? outLabel;
+      const outConf = Number(data?.confidence ?? 0);
 
-      const curLabel = data?.label ?? null;
-      if (curLabel && curLabel === lastLabelRef.current) streakRef.current += 1;
-      else {
-        lastLabelRef.current = curLabel;
-        streakRef.current = 1;
-      }
-
-      if ((data?.confidence ?? 0) >= 0.85 && streakRef.current >= 3) {
-        setLabel(data.label);
-        setText(data.text ?? data.label);
-        setConf(data.confidence ?? 0);
-      } else {
-        setConf(data?.confidence ?? 0);
-      }
-    } catch (e) {
-      console.error("Error during translation:", e);
-    } finally {
-      inFlightRef.current = false;
-=======
-      console.log("[PREDICT] response:", data);
-
-      // 서버 응답 형태(네 스샷 기준):
-      // {
-      //   "label": "call",
-      //   "confidence": 0.998...,
-      //   "text": "call",
-      //   "top5": [ {"call":0.99}, {"drink":0.001}, ... ],
-      //   "pred_idx": 0
-      // }
-
-      const outLabel = data?.label ?? data?.pred ?? "-";
-      const outText = data?.text ?? outLabel ?? "-";
-      const outConf = Number(data?.confidence ?? data?.score ?? 0);
-
-      setLabel(String(outLabel));
-      setText(String(outText));
+      setLabel(outLabel);
+      setText(outText);
       setConfidence(Number.isFinite(outConf) ? outConf : 0);
 
       const t5 = Array.isArray(data?.top5)
@@ -592,173 +566,117 @@ export default function TranslatorCam() {
           })
         : [];
       setTop5UI(t5);
+
+      console.log("[PREDICT] response =", data);
     } catch (e) {
       console.error("Error during predict:", e);
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
+    } finally {
+      inFlightRef.current = false;
     }
   }
 
-  const curCount = framesRef.current.length;
-  const progressPct = Math.round((Math.min(curCount, FRAMES) / FRAMES) * 100);
+  const timeProgress =
+    recordingUI && captureStartRef.current > 0
+      ? Math.min(
+          100,
+          Math.round(((CAPTURE_MS - msLeft) / CAPTURE_MS) * 100)
+        )
+      : captured
+      ? 100
+      : 0;
 
   return (
     <div style={{ padding: 16 }}>
-      <h2 style={{ margin: 0, marginBottom: 12 }}>TranslatorCam</h2>
+      <h2>TranslatorCam (고FPS 캡처 → 30프레임 시간리샘플)</h2>
 
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-<<<<<<< HEAD
         <div>
-          {/* ✅ 키워드 입력 */}
-          <div style={{ marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>
-            <input
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder="키워드 입력 후 Start"
-              style={{ width: 480, padding: "8px 10px", borderRadius: 8, border: "1px solid #444" }}
-              disabled={running}
-            />
-          </div>
-
-          {/* ✅ video + canvas overlay */}
-          <div style={{ position: "relative", width: 480 }}>
-=======
-        {/* LEFT: video + controls */}
-        <div style={{ width: 520 }}>
-          <div
-            style={{
-              width: 480,
-              height: 270,
-              borderRadius: 16,
-              background: "#111",
-              overflow: "hidden",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
+          <div style={{ position: "relative", width: 560 }}>
             <video
               ref={videoRef}
               playsInline
               muted
-<<<<<<< HEAD
-              style={{
-                width: 480,
-                borderRadius: 12,
-                background: "#111",
-                display: "block",
-                transform: MIRROR ? "scaleX(-1)" : "none",
-              }}
+              style={{ width: 560, borderRadius: 12, background: "#111" }}
             />
             <canvas
               ref={canvasRef}
               style={{
                 position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                borderRadius: 12,
+                left: 0,
+                top: 0,
+                width: 560,
+                height: "auto",
                 pointerEvents: "none",
-                transform: MIRROR ? "scaleX(-1)" : "none",
               }}
             />
           </div>
 
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-            <button disabled={!ready || running || !keyword.trim()} onClick={startCam}>
-=======
-              style={{ width: 480, height: 270, objectFit: "cover" }}
-            />
-          </div>
-
-          <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-            <button disabled={!ready || running} onClick={startCam}>
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
-              Start
+            <button disabled={!ready || camOn} onClick={startCam}>
+              Start Cam
             </button>
-            <button disabled={!ready || !running} onClick={stopAndPredict}>
-              Stop (Predict)
+            <button disabled={!camOn} onClick={stopCam}>
+              Stop Cam
             </button>
-<<<<<<< HEAD
-
-            {/* ✅ 30프레임 꽉 찼을 때만 저장 가능 */}
-            <button disabled={framesCount < FRAMES} onClick={saveClipToFile}>
-              Save JSON
+            <button disabled={!camOn || armedUI || recordingUI} onClick={record}>
+              Record ({CAPTURE_MS / 1000}s)
+            </button>
+            <button disabled={!captured || recordingUI || armedUI} onClick={sendPredict}>
+              Send (Translate)
             </button>
           </div>
 
-          <div style={{ marginTop: 10, fontSize: 14, opacity: 0.9 }}>
-            frames: {framesCount}/{FRAMES} | conf: {conf.toFixed(3)}
-=======
-            <div style={{ fontSize: 12, opacity: 0.75, marginLeft: 8 }}>
-              ready: {String(ready)} / running: {String(running)}
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 13, opacity: 0.85 }}>
+              status: {camOn ? "camOn" : "camOff"} | armed(wait hand): {String(armedUI)} | recording:{" "}
+              {String(recordingUI)} | captured: {String(captured)}
+              <br />
+              captureLeft(ms): {recordingUI ? msLeft : 0} | rawFrames: {rawCount} | finalFrames:{" "}
+              {framesCount}/{TARGET_FRAMES} | rawFpsCap: {RAW_FPS_CAP}
             </div>
-          </div>
 
-          {/* frames progress */}
-          <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
-              frames: {Math.min(curCount, FRAMES)}/{FRAMES} {running ? "(capturing)" : "(stopped)"}{" "}
-              | sentFrames(last stop): {sentFramesRef.current}
-            </div>
             <div
               style={{
-                width: 480,
                 height: 10,
-                borderRadius: 999,
                 background: "#eee",
+                borderRadius: 999,
                 overflow: "hidden",
+                marginTop: 6,
               }}
             >
-              <div
-                style={{
-                  width: `${progressPct}%`,
-                  height: "100%",
-                  background: "#111",
-                }}
-              />
+              <div style={{ width: `${timeProgress}%`, height: "100%", background: "#111" }} />
             </div>
-          </div>
 
-          {/* debug */}
-          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
-            debug: poseE={dbg.poseE.toFixed(2)} / leftE={dbg.leftE.toFixed(2)} / rightE={dbg.rightE.toFixed(2)}{" "}
-            / handCount={dbg.handCount}
-            <div style={{ marginTop: 6, opacity: 0.7 }}>
-              (랜드마크가 잠깐 0 되는 문제는 hold-last로 완화됨)
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+              debug: min={dbg.min.toFixed(4)} max={dbg.max.toFixed(4)} mean={dbg.mean.toFixed(4)} | handCount={dbg.handCount}
+              <br />
+              ※ Record 후 손이 처음 잡히는 순간부터 {CAPTURE_MS / 1000}s 동안 raw를 촘촘히 모으고,
+              <br />
+              ※ 시간축 기준으로 30프레임으로 리샘플해서 모델에 넣습니다(작은 동작 보존).
             </div>
->>>>>>> aff6e3567388b566778abfd2fcc63025c79f6a95
           </div>
         </div>
 
-        {/* RIGHT: results */}
-        <div style={{ minWidth: 360 }}>
-          <div style={{ fontSize: 13, opacity: 0.8 }}>label</div>
-          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 10 }}>{label}</div>
+        <div style={{ minWidth: 320 }}>
+          <div style={{ fontSize: 14, opacity: 0.8 }}>label</div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>{label}</div>
 
-          <div style={{ fontSize: 13, opacity: 0.8 }}>text</div>
-          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 10 }}>{text}</div>
+          <div style={{ marginTop: 12, fontSize: 14, opacity: 0.8 }}>text</div>
+          <div style={{ fontSize: 28, fontWeight: 800 }}>{text}</div>
 
-          <div style={{ fontSize: 13, opacity: 0.8 }}>confidence</div>
-          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 14 }}>
+          <div style={{ marginTop: 12, fontSize: 14, opacity: 0.8 }}>confidence</div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>
             {Number.isFinite(confidence) ? confidence.toFixed(6) : "0.000000"}
           </div>
 
-          <div style={{ fontSize: 13, opacity: 0.8 }}>top5</div>
-          <ol style={{ marginTop: 8 }}>
+          <div style={{ marginTop: 16, fontSize: 14, opacity: 0.8 }}>top5</div>
+          <ol style={{ marginTop: 6 }}>
             {top5UI.map((x, idx) => (
               <li key={`${x.label}-${idx}`}>
-                {x.label}{" "}
-                {typeof x.score === "number" ? `(${x.score.toFixed(6)})` : ""}
+                {x.label} {typeof x.score === "number" ? `(${x.score.toFixed(6)})` : ""}
               </li>
             ))}
           </ol>
-
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7, lineHeight: 1.5 }}>
-            ※ Stop을 누를 때 마지막 {FRAMES}프레임을 서버로 보내서 예측합니다.
-            <br />
-            ※ face는 현재 0으로 채움(동작 우선). 다음 단계에서 face 70개 매핑 붙이면 정확도 더 올라감.
-          </div>
         </div>
       </div>
     </div>
